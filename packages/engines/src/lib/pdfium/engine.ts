@@ -9879,7 +9879,7 @@ export class PdfiumNative implements IPdfiumExecutor {
       });
     }
 
-    const data = this.pdfiumModule.pdfium.HEAPU8.subarray(heapPtr, heapPtr + bytes);
+    const data = this.pdfiumModule.pdfium.HEAPU8.slice(heapPtr, heapPtr + bytes);
     // Return plain object (ImageDataLike) instead of browser-specific ImageData
     const imageDataLike: ImageDataLike = {
       data: new Uint8ClampedArray(data),
@@ -10213,7 +10213,7 @@ export class PdfiumNative implements IPdfiumExecutor {
     // Return plain object (ImageDataLike) instead of browser-specific ImageData
     // This ensures compatibility with Node.js and other non-browser environments
     const imageDataLike: ImageDataLike = {
-      data: new Uint8ClampedArray(data),
+      data: new Uint8ClampedArray(data.buffer as ArrayBuffer, data.byteOffset, data.byteLength),
       width: wDev,
       height: hDev,
     };
