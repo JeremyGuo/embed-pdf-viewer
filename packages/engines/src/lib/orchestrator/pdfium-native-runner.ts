@@ -27,6 +27,39 @@ export interface WorkerResponse {
   progress?: any;
 }
 
+function collectTransferables(
+  value: unknown,
+  output: Transferable[] = [],
+  seen: Set<ArrayBuffer> = new Set(),
+): Transferable[] {
+  if (!value || typeof value !== 'object') return output;
+
+  if (ArrayBuffer.isView(value)) {
+    const buffer = value.buffer;
+    if (buffer instanceof ArrayBuffer && buffer.byteLength > 0 && !seen.has(buffer)) {
+      seen.add(buffer);
+      output.push(buffer);
+    }
+    return output;
+  }
+
+  if (value instanceof ArrayBuffer && value.byteLength > 0 && !seen.has(value)) {
+    seen.add(value);
+    output.push(value);
+    return output;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) collectTransferables(item, output, seen);
+    return output;
+  }
+
+  for (const nested of Object.values(value as Record<string, unknown>)) {
+    collectTransferables(nested, output, seen);
+  }
+  return output;
+}
+
 /**
  * PdfiumNativeRunner - Worker runner for PdfiumNative
  *
@@ -255,7 +288,11 @@ export class PdfiumNativeRunner {
    */
   private respond(response: WorkerResponse): void {
     this.logger.debug(LOG_SOURCE, LOG_CATEGORY, 'Sending response:', response.type);
-    self.postMessage(response);
+    const transferables = response.type === 'result' ? collectTransferables(response.data) : [];
+    const workerSelf = self as unknown as {
+      postMessage(message: WorkerResponse, transfer: Transferable[]): void;
+    };
+    workerSelf.postMessage(response, transferables);
   }
 
   /**
