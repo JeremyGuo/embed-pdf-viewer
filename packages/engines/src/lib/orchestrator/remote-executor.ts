@@ -137,6 +137,44 @@ type MessageType =
   | 'isEncrypted'
   | 'isOwnerUnlocked';
 
+type WorkerInitErrorResponse = {
+  type: 'wasmError';
+  error?: string;
+};
+
+function collectTransferables(
+  value: unknown,
+  output: Transferable[] = [],
+  seen: Set<ArrayBuffer> = new Set(),
+): Transferable[] {
+  if (!value || typeof value !== 'object') return output;
+
+  if (ArrayBuffer.isView(value)) {
+    const buffer = value.buffer;
+    if (buffer instanceof ArrayBuffer && buffer.byteLength > 0 && !seen.has(buffer)) {
+      seen.add(buffer);
+      output.push(buffer);
+    }
+    return output;
+  }
+
+  if (value instanceof ArrayBuffer && value.byteLength > 0 && !seen.has(value)) {
+    seen.add(value);
+    output.push(value);
+    return output;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) collectTransferables(item, output, seen);
+    return output;
+  }
+
+  for (const nested of Object.values(value as Record<string, unknown>)) {
+    collectTransferables(nested, output, seen);
+  }
+  return output;
+}
+
 /**
  * RemoteExecutor - Proxy for worker communication
  *
@@ -188,7 +226,11 @@ export class RemoteExecutor implements IPdfiumExecutor {
    * Send a message to the worker and return a Task
    * Waits for worker to be ready before sending
    */
-  private send<T, P = unknown>(method: MessageType, args: any[]): Task<T, PdfErrorReason, P> {
+  private send<T, P = unknown>(
+    method: MessageType,
+    args: any[],
+    transferables: Transferable[] = [],
+  ): Task<T, PdfErrorReason, P> {
     const id = this.generateId();
     const task = new Task<T, PdfErrorReason, P>();
 
@@ -204,7 +246,7 @@ export class RemoteExecutor implements IPdfiumExecutor {
       () => {
         this.pendingRequests.set(id, task);
         this.logger.debug(LOG_SOURCE, LOG_CATEGORY, `Sending ${method} request:`, id);
-        this.worker.postMessage(request);
+        this.worker.postMessage(request, transferables);
       },
       (error) => {
         this.logger.error(
@@ -226,8 +268,19 @@ export class RemoteExecutor implements IPdfiumExecutor {
   /**
    * Handle messages from worker
    */
-  private handleMessage = (event: MessageEvent<WorkerResponse>) => {
+  private handleMessage = (event: MessageEvent<WorkerResponse | WorkerInitErrorResponse>) => {
     const response = event.data;
+
+    if (response.type === 'wasmError') {
+      const reason = {
+        code: PdfErrorCode.Initialization,
+        message: response.error || 'Worker WASM initialization failed',
+      };
+      this.logger.error(LOG_SOURCE, LOG_CATEGORY, 'Worker initialization failed:', reason);
+      this.readyTask.reject(reason);
+      this.pendingRequests.delete(RemoteExecutor.READY_TASK_ID);
+      return;
+    }
 
     // Handle ready response - resolve the readyTask
     if (response.type === 'ready') {
@@ -301,7 +354,11 @@ export class RemoteExecutor implements IPdfiumExecutor {
     file: PdfFile,
     options?: PdfOpenDocumentBufferOptions,
   ): PdfTask<PdfDocumentObject> {
-    return this.send<PdfDocumentObject>('openDocumentBuffer', [file, options]);
+    return this.send<PdfDocumentObject>(
+      'openDocumentBuffer',
+      [file, options],
+      collectTransferables(file.content),
+    );
   }
 
   getMetadata(doc: PdfDocumentObject): PdfTask<PdfMetadataObject> {
