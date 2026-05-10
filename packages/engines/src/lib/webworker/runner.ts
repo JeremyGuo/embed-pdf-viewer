@@ -462,6 +462,9 @@ export class EngineRunner {
       case 'getPageGeometry':
         this.handleTask(request.id, engine.getPageGeometry!(...args));
         return;
+      case 'getPageTextGeometry':
+        this.handleTask(request.id, engine.getPageTextGeometry!(...args));
+        return;
       case 'getPageTextRuns':
         this.handleTask(request.id, engine.getPageTextRuns!(...args));
         return;

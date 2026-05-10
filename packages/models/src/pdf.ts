@@ -2787,6 +2787,38 @@ export interface PdfPageGeometry {
 }
 
 /**
+ * Minimal logical text run paired with glyph geometry.
+ *
+ * @public
+ */
+export interface PdfPageTextGeometryRun {
+  /** Text content for this logical run. */
+  text: string;
+  /** Start character index in the PDFium text page. */
+  charIndex: number;
+  /** Number of characters in this run. */
+  charCount: number;
+}
+
+/**
+ * Fused page text geometry result.
+ *
+ * @public
+ */
+export interface PdfPageTextGeometry {
+  /** Glyph geometry grouped into PDF text-object runs. */
+  geometry: PdfPageGeometry;
+  /** Minimal logical text runs ordered by PDFium character index. */
+  pageText: {
+    runs: PdfPageTextGeometryRun[];
+  };
+  /** Number of characters reported by PDFium for the page. */
+  glyphCount: number;
+  /** Number of emitted logical text runs. */
+  textRunCount: number;
+}
+
+/**
  * Font information extracted from a PDF text object.
  *
  * @public
@@ -3834,6 +3866,16 @@ export interface PdfEngine<T = Blob> {
    */
   getPageGeometry: (doc: PdfDocumentObject, page: PdfPageObject) => PdfTask<PdfPageGeometry>;
   /**
+   * Get fused glyph geometry and minimal logical text in one PDFium pass
+   * @param doc - pdf document
+   * @param page - pdf page
+   * @returns task contains fused text geometry
+   */
+  getPageTextGeometry: (
+    doc: PdfDocumentObject,
+    page: PdfPageObject,
+  ) => PdfTask<PdfPageTextGeometry>;
+  /**
    * Get rich text runs for a page, grouped by text object with font and color info
    * @param doc - pdf document
    * @param page - pdf page
@@ -4132,6 +4174,10 @@ export interface IPdfiumExecutor {
   getTextSlices(doc: PdfDocumentObject, slices: PageTextSlice[]): PdfTask<string[]>;
   getPageGlyphs(doc: PdfDocumentObject, page: PdfPageObject): PdfTask<PdfGlyphObject[]>;
   getPageGeometry(doc: PdfDocumentObject, page: PdfPageObject): PdfTask<PdfPageGeometry>;
+  getPageTextGeometry(
+    doc: PdfDocumentObject,
+    page: PdfPageObject,
+  ): PdfTask<PdfPageTextGeometry>;
   getPageTextRuns(doc: PdfDocumentObject, page: PdfPageObject): PdfTask<PdfPageTextRuns>;
   merge(files: PdfFile[]): PdfTask<PdfFile>;
   mergePages(mergeConfigs: Array<{ docId: string; pageIndices: number[] }>): PdfTask<PdfFile>;

@@ -37,6 +37,7 @@ import {
   PageTextSlice,
   PdfGlyphObject,
   PdfPageGeometry,
+  PdfPageTextGeometry,
   PdfPageTextRuns,
   PdfPrintOptions,
   PdfEngineFeature,
@@ -1084,6 +1085,19 @@ export class PdfEngine<T = Blob> implements IPdfEngine<T> {
       {
         execute: () => this.executor.getPageGeometry(doc, page),
         meta: { docId: doc.id, pageIndex: page.index, operation: 'getPageGeometry' },
+      },
+      { priority: Priority.MEDIUM },
+    );
+  }
+
+  getPageTextGeometry(
+    doc: PdfDocumentObject,
+    page: PdfPageObject,
+  ): PdfTask<PdfPageTextGeometry> {
+    return this.workerQueue.enqueue(
+      {
+        execute: () => this.executor.getPageTextGeometry(doc, page),
+        meta: { docId: doc.id, pageIndex: page.index, operation: 'getPageTextGeometry' },
       },
       { priority: Priority.MEDIUM },
     );

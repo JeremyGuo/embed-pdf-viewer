@@ -30,6 +30,7 @@ import {
   PageTextSlice,
   PdfGlyphObject,
   PdfPageGeometry,
+  PdfPageTextGeometry,
   PdfPageTextRuns,
   PdfPrintOptions,
   PdfSignatureObject,
@@ -122,6 +123,7 @@ type MessageType =
   | 'getTextSlices'
   | 'getPageGlyphs'
   | 'getPageGeometry'
+  | 'getPageTextGeometry'
   | 'getPageTextRuns'
   | 'merge'
   | 'mergePages'
@@ -633,6 +635,13 @@ export class RemoteExecutor implements IPdfiumExecutor {
 
   getPageGeometry(doc: PdfDocumentObject, page: PdfPageObject): PdfTask<PdfPageGeometry> {
     return this.send<PdfPageGeometry>('getPageGeometry', [doc, page]);
+  }
+
+  getPageTextGeometry(
+    doc: PdfDocumentObject,
+    page: PdfPageObject,
+  ): PdfTask<PdfPageTextGeometry> {
+    return this.send<PdfPageTextGeometry>('getPageTextGeometry', [doc, page]);
   }
 
   getPageTextRuns(doc: PdfDocumentObject, page: PdfPageObject): PdfTask<PdfPageTextRuns> {

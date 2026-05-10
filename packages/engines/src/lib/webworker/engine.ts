@@ -24,6 +24,7 @@ import {
   PdfFileUrl,
   PdfGlyphObject,
   PdfPageGeometry,
+  PdfPageTextGeometry,
   PdfPageTextRuns,
   PageTextSlice,
   AnnotationCreateContext,
@@ -1250,6 +1251,22 @@ export class WebWorkerEngine implements PdfEngine {
     const task = new WorkerTask<PdfPageGeometry>(this.worker, requestId);
 
     const request: ExecuteRequest = createRequest(requestId, 'getPageGeometry', [doc, page]);
+    this.proxy(task, request);
+
+    return task;
+  }
+
+  /**
+   * {@inheritDoc @embedpdf/models!PdfEngine.getPageTextGeometry}
+   *
+   * @public
+   */
+  getPageTextGeometry(doc: PdfDocumentObject, page: PdfPageObject) {
+    this.logger.debug(LOG_SOURCE, LOG_CATEGORY, 'getPageTextGeometry', doc, page);
+    const requestId = this.generateRequestId(doc.id);
+    const task = new WorkerTask<PdfPageTextGeometry>(this.worker, requestId);
+
+    const request: ExecuteRequest = createRequest(requestId, 'getPageTextGeometry', [doc, page]);
     this.proxy(task, request);
 
     return task;

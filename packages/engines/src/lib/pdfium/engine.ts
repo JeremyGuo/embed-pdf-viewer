@@ -131,6 +131,8 @@ import {
   PdfFontInfo,
   PdfTextRun,
   PdfPageTextRuns,
+  PdfPageTextGeometry,
+  PdfPageTextGeometryRun,
   PdfAlphaColor,
   PdfBlendMode,
 } from '@embedpdf/models';
@@ -169,6 +171,18 @@ export enum RenderFlag {
 
 const LOG_SOURCE = 'PDFiumEngine';
 const LOG_CATEGORY = 'Engine';
+
+type GlyphScratch = {
+  dx1Ptr: WasmPointer;
+  dy1Ptr: WasmPointer;
+  dx2Ptr: WasmPointer;
+  dy2Ptr: WasmPointer;
+  rectPtr: WasmPointer;
+  tLeftPtr: WasmPointer;
+  tRightPtr: WasmPointer;
+  tBottomPtr: WasmPointer;
+  tTopPtr: WasmPointer;
+};
 
 /**
  * Error code of pdfium library
@@ -4958,6 +4972,73 @@ export class PdfiumNative implements IPdfiumExecutor {
   }
 
   /**
+   * Return glyph geometry and minimal logical text in one PDFium pass.
+   *
+   * This avoids the expensive getPageTextRuns + getPageGeometry double
+   * traversal and reuses native scratch pointers across all glyphs on a page.
+   *
+   * @public
+   */
+  getPageTextGeometry(
+    doc: PdfDocumentObject,
+    page: PdfPageObject,
+  ): PdfTask<PdfPageTextGeometry> {
+    const label = 'getPageTextGeometry';
+    this.logger.perf(LOG_SOURCE, LOG_CATEGORY, label, 'Begin', doc.id);
+
+    const ctx = this.cache.getContext(doc.id);
+    if (!ctx) {
+      this.logger.perf(LOG_SOURCE, LOG_CATEGORY, label, 'End', doc.id);
+      return PdfTaskHelper.reject({
+        code: PdfErrorCode.DocNotOpen,
+        message: 'document does not open',
+      });
+    }
+
+    const pageCtx = ctx.acquirePage(page.index);
+    const scratch = this.createGlyphScratch();
+
+    try {
+      const textPagePtr = pageCtx.getTextPage();
+      const glyphCount = this.pdfiumModule.FPDFText_CountChars(textPagePtr);
+      const glyphs: PdfGlyphObject[] = [];
+      const textRuns: PdfPageTextGeometryRun[] = [];
+
+      for (let i = 0; i < glyphCount; i++) {
+        const { glyph, codePoint } = this.readGlyphInfoWithScratch(
+          page,
+          pageCtx.pagePtr,
+          textPagePtr,
+          i,
+          scratch,
+        );
+        glyphs.push(glyph);
+
+        const text = this.unicodeToString(codePoint);
+        if (text) {
+          textRuns.push({
+            text,
+            charIndex: i,
+            charCount: 1,
+          });
+        }
+      }
+
+      const runs: PdfRun[] = this.buildRunsFromGlyphs(glyphs, textPagePtr);
+      this.logger.perf(LOG_SOURCE, LOG_CATEGORY, label, 'End', doc.id);
+      return PdfTaskHelper.resolve({
+        geometry: { runs },
+        pageText: { runs: textRuns },
+        glyphCount,
+        textRunCount: textRuns.length,
+      });
+    } finally {
+      this.releaseGlyphScratch(scratch);
+      pageCtx.release();
+    }
+  }
+
+  /**
    * Group consecutive glyphs that belong to the same CPDF_TextObject
    * using FPDFText_GetTextObject(), and calculate rotation from glyph positions.
    */
@@ -5030,6 +5111,187 @@ export class PdfiumNative implements IPdfiumExecutor {
     }
 
     return runs;
+  }
+
+  private unicodeToString(codePoint: number): string {
+    if (
+      !Number.isFinite(codePoint) ||
+      codePoint <= 0 ||
+      codePoint === 0xfffe ||
+      codePoint === 0xfffd
+    ) {
+      return '';
+    }
+    try {
+      return String.fromCodePoint(codePoint);
+    } catch {
+      return '';
+    }
+  }
+
+  private createGlyphScratch(): GlyphScratch {
+    return {
+      dx1Ptr: this.memoryManager.malloc(4),
+      dy1Ptr: this.memoryManager.malloc(4),
+      dx2Ptr: this.memoryManager.malloc(4),
+      dy2Ptr: this.memoryManager.malloc(4),
+      rectPtr: this.memoryManager.malloc(16),
+      tLeftPtr: this.memoryManager.malloc(8),
+      tRightPtr: this.memoryManager.malloc(8),
+      tBottomPtr: this.memoryManager.malloc(8),
+      tTopPtr: this.memoryManager.malloc(8),
+    };
+  }
+
+  private releaseGlyphScratch(scratch: GlyphScratch): void {
+    [
+      scratch.rectPtr,
+      scratch.dx1Ptr,
+      scratch.dy1Ptr,
+      scratch.dx2Ptr,
+      scratch.dy2Ptr,
+      scratch.tLeftPtr,
+      scratch.tRightPtr,
+      scratch.tBottomPtr,
+      scratch.tTopPtr,
+    ].forEach((ptr) => this.memoryManager.free(ptr));
+  }
+
+  private readGlyphInfoWithScratch(
+    page: PdfPageObject,
+    pagePtr: number,
+    textPagePtr: number,
+    charIndex: number,
+    scratch: GlyphScratch,
+  ): { glyph: PdfGlyphObject; codePoint: number } {
+    const codePoint = this.pdfiumModule.FPDFText_GetUnicode(textPagePtr, charIndex);
+    let x = 0;
+    let y = 0;
+    let width = 0;
+    let height = 0;
+    let tightOrigin: { x: number; y: number } | undefined;
+    let tightSize: { width: number; height: number } | undefined;
+
+    if (!this.pdfiumModule.FPDFText_GetLooseCharBox(textPagePtr, charIndex, scratch.rectPtr)) {
+      return {
+        glyph: { origin: { x, y }, size: { width, height } },
+        codePoint,
+      };
+    }
+
+    const left = this.pdfiumModule.pdfium.getValue(scratch.rectPtr, 'float');
+    const top = this.pdfiumModule.pdfium.getValue(scratch.rectPtr + 4, 'float');
+    const right = this.pdfiumModule.pdfium.getValue(scratch.rectPtr + 8, 'float');
+    const bottom = this.pdfiumModule.pdfium.getValue(scratch.rectPtr + 12, 'float');
+
+    if (left === right || top === bottom) {
+      return {
+        glyph: {
+          origin: { x: 0, y: 0 },
+          size: { width: 0, height: 0 },
+          isEmpty: true,
+        },
+        codePoint,
+      };
+    }
+
+    this.pdfiumModule.FPDF_PageToDevice(
+      pagePtr,
+      0,
+      0,
+      page.size.width,
+      page.size.height,
+      0,
+      left,
+      top,
+      scratch.dx1Ptr,
+      scratch.dy1Ptr,
+    );
+    this.pdfiumModule.FPDF_PageToDevice(
+      pagePtr,
+      0,
+      0,
+      page.size.width,
+      page.size.height,
+      0,
+      right,
+      bottom,
+      scratch.dx2Ptr,
+      scratch.dy2Ptr,
+    );
+
+    const x1 = this.pdfiumModule.pdfium.getValue(scratch.dx1Ptr, 'i32');
+    const y1 = this.pdfiumModule.pdfium.getValue(scratch.dy1Ptr, 'i32');
+    const x2 = this.pdfiumModule.pdfium.getValue(scratch.dx2Ptr, 'i32');
+    const y2 = this.pdfiumModule.pdfium.getValue(scratch.dy2Ptr, 'i32');
+
+    x = Math.min(x1, x2);
+    y = Math.min(y1, y2);
+    width = Math.max(1, Math.abs(x2 - x1));
+    height = Math.max(1, Math.abs(y2 - y1));
+
+    if (
+      this.pdfiumModule.FPDFText_GetCharBox(
+        textPagePtr,
+        charIndex,
+        scratch.tLeftPtr,
+        scratch.tRightPtr,
+        scratch.tBottomPtr,
+        scratch.tTopPtr,
+      )
+    ) {
+      const tLeft = this.pdfiumModule.pdfium.getValue(scratch.tLeftPtr, 'double');
+      const tRight = this.pdfiumModule.pdfium.getValue(scratch.tRightPtr, 'double');
+      const tBottom = this.pdfiumModule.pdfium.getValue(scratch.tBottomPtr, 'double');
+      const tTop = this.pdfiumModule.pdfium.getValue(scratch.tTopPtr, 'double');
+
+      this.pdfiumModule.FPDF_PageToDevice(
+        pagePtr,
+        0,
+        0,
+        page.size.width,
+        page.size.height,
+        0,
+        tLeft,
+        tTop,
+        scratch.dx1Ptr,
+        scratch.dy1Ptr,
+      );
+      this.pdfiumModule.FPDF_PageToDevice(
+        pagePtr,
+        0,
+        0,
+        page.size.width,
+        page.size.height,
+        0,
+        tRight,
+        tBottom,
+        scratch.dx2Ptr,
+        scratch.dy2Ptr,
+      );
+
+      const tx1 = this.pdfiumModule.pdfium.getValue(scratch.dx1Ptr, 'i32');
+      const ty1 = this.pdfiumModule.pdfium.getValue(scratch.dy1Ptr, 'i32');
+      const tx2 = this.pdfiumModule.pdfium.getValue(scratch.dx2Ptr, 'i32');
+      const ty2 = this.pdfiumModule.pdfium.getValue(scratch.dy2Ptr, 'i32');
+
+      tightOrigin = { x: Math.min(tx1, tx2), y: Math.min(ty1, ty2) };
+      tightSize = {
+        width: Math.max(1, Math.abs(tx2 - tx1)),
+        height: Math.max(1, Math.abs(ty2 - ty1)),
+      };
+    }
+
+    return {
+      glyph: {
+        origin: { x, y },
+        size: { width, height },
+        ...(tightOrigin && { tightOrigin }),
+        ...(tightSize && { tightSize }),
+        ...(codePoint === 32 && { isSpace: true }),
+      },
+      codePoint,
+    };
   }
 
   /**
