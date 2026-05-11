@@ -34,6 +34,13 @@ function collectTransferables(
 ): Transferable[] {
   if (!value || typeof value !== 'object') return output;
 
+  const ImageBitmapCtor = (globalThis as typeof globalThis & { ImageBitmap?: typeof ImageBitmap })
+    .ImageBitmap;
+  if (ImageBitmapCtor && value instanceof ImageBitmapCtor) {
+    output.push(value as Transferable);
+    return output;
+  }
+
   if (ArrayBuffer.isView(value)) {
     const buffer = value.buffer;
     if (buffer instanceof ArrayBuffer && buffer.byteLength > 0 && !seen.has(buffer)) {
@@ -58,6 +65,25 @@ function collectTransferables(
     collectTransferables(nested, output, seen);
   }
   return output;
+}
+
+function shouldCreateImageBitmap(method: string, args: any[]): boolean {
+  if (
+    method !== 'renderPageRaw' &&
+    method !== 'renderPageRect' &&
+    method !== 'renderThumbnailRaw' &&
+    method !== 'renderPageAnnotationRaw'
+  ) {
+    return false;
+  }
+
+  const options =
+    method === 'renderPageRect'
+      ? args?.[3]
+      : method === 'renderPageAnnotationRaw'
+        ? args?.[3]
+        : args?.[2];
+  return Boolean(options?.preferImageBitmap);
 }
 
 /**
@@ -244,13 +270,31 @@ export class PdfiumNativeRunner {
         // Wait for result
         task.wait(
           (data) => {
-            this.logger.debug(LOG_SOURCE, LOG_CATEGORY, `Method ${method} resolved`);
-            this.respond({
-              id: request.id,
-              type: 'result',
-              data,
-            });
-            this.activeTasks.delete(request.id);
+            this.prepareResultData(method, args, data)
+              .then((preparedData) => {
+                this.logger.debug(LOG_SOURCE, LOG_CATEGORY, `Method ${method} resolved`);
+                this.respond({
+                  id: request.id,
+                  type: 'result',
+                  data: preparedData,
+                });
+              })
+              .catch((error) => {
+                this.logger.warn(
+                  LOG_SOURCE,
+                  LOG_CATEGORY,
+                  `Result preparation failed for ${method}, returning original data:`,
+                  error,
+                );
+                this.respond({
+                  id: request.id,
+                  type: 'result',
+                  data,
+                });
+              })
+              .finally(() => {
+                this.activeTasks.delete(request.id);
+              });
           },
           (error) => {
             this.logger.debug(LOG_SOURCE, LOG_CATEGORY, `Method ${method} failed:`, error);
@@ -264,11 +308,27 @@ export class PdfiumNativeRunner {
         );
       } else {
         // Synchronous result
-        this.respond({
-          id: request.id,
-          type: 'result',
-          data: result,
-        });
+        this.prepareResultData(method, args, result)
+          .then((data) => {
+            this.respond({
+              id: request.id,
+              type: 'result',
+              data,
+            });
+          })
+          .catch((error) => {
+            this.logger.warn(
+              LOG_SOURCE,
+              LOG_CATEGORY,
+              `Result preparation failed for ${method}, returning original data:`,
+              error,
+            );
+            this.respond({
+              id: request.id,
+              type: 'result',
+              data: result,
+            });
+          });
       }
     } catch (error) {
       this.logger.error(LOG_SOURCE, LOG_CATEGORY, `Error executing ${method}:`, error);
@@ -281,6 +341,33 @@ export class PdfiumNativeRunner {
         },
       });
     }
+  }
+
+  private async prepareResultData(method: string, args: any[], data: any): Promise<any> {
+    if (!shouldCreateImageBitmap(method, args)) return data;
+    if (!data?.data || !(data.width > 0) || !(data.height > 0)) return data;
+    if (typeof createImageBitmap !== 'function' || typeof ImageData === 'undefined') return data;
+
+    const source = data.data;
+    const pixels =
+      source instanceof Uint8ClampedArray
+        ? source
+        : source instanceof ArrayBuffer
+          ? new Uint8ClampedArray(source)
+        : new Uint8ClampedArray(
+            source.buffer as ArrayBuffer,
+            source.byteOffset ?? 0,
+            source.byteLength,
+          );
+    const bitmap = await createImageBitmap(
+      new ImageData(pixels as unknown as ImageDataArray, data.width, data.height),
+    );
+    return {
+      width: data.width,
+      height: data.height,
+      bitmap,
+      bitmapMode: 'imagebitmap',
+    };
   }
 
   /**

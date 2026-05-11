@@ -249,15 +249,20 @@ export class RemoteExecutor implements IPdfiumExecutor {
         this.worker.postMessage(request, transferables);
       },
       (error) => {
+        const reason = (
+          error?.type === 'reject' || error?.type === 'abort'
+            ? error.reason
+            : error
+        ) as PdfErrorReason | undefined;
         this.logger.error(
           LOG_SOURCE,
           LOG_CATEGORY,
           `Worker init failed, rejecting ${method}:`,
-          error,
+          reason,
         );
         task.reject({
-          code: PdfErrorCode.Initialization,
-          message: 'Worker initialization failed',
+          code: reason?.code ?? PdfErrorCode.Initialization,
+          message: reason?.message || 'Worker initialization failed',
         });
       },
     );
